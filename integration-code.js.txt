@@ -1,0 +1,186 @@
+//*********Initialization
+
+const users = [];
+const appliances = [];
+const abnormalCount = []
+const maxUserCount = 16;
+const maxApplianceCount = 1;
+
+const initializeUsers = () => {
+  for (let i = 0; i < maxUserCount; i += 1) {
+    let user = {};
+    user.user = undefined;
+    user.activity = undefined;
+    users.push(user);
+  }
+}
+
+const initializeAppliances = () => {
+  for (let i = 0; i < maxApplianceCount; i += 1) {
+    let appliance = {};
+    appliance.name = undefined;
+    appliance.status = undefined;
+    appliances.push(appliance);
+  }
+  appliances[0].name = 'Light';
+}
+
+const initializeAbnormalCount = () => {
+  for (let i = 0; i < maxUserCount; i += 1) {
+    let abnormal = {};
+    abnormal.fall = 0;
+    abnormal.sittingAndApplianceOn = 0;
+    abnormalCount.push(abnormal);
+  }
+}
+
+initializeUsers();
+initializeAppliances();
+initializeAbnormalCount();
+
+//*********ExpressJS server and Socket.io Realtime display
+
+const express = require('express');
+const app = express();
+var expressServer = require('http').Server(app);
+var io = require('socket.io')(expressServer);
+app.use(express.static('public'));
+
+io.on('connection', (socket) => {
+  console.log("connected");
+  io.emit('userdata', users);
+  io.emit('appliancedata', appliances);
+  io.emit('notification', "No notifications");
+});
+
+
+expressServer.listen(8080, () => { console.log('Express server bound to 8080'); });
+
+//*********Receiving data from Arduino
+
+const SerialPort = require('serialport');
+const Readline = SerialPort.parsers.Readline;
+const port = new SerialPort('/dev/ttyACM1', {
+  baudRate: 9600,
+  autoOpen: false
+});
+
+const parser = port.pipe(new Readline({ delimiter: '\r\n' }));
+
+port.on('open', function (err) {
+  console.log('Serial Port Opened');
+})
+
+port.on('error', function (err) {
+  console.log('Error opening port: ', err.message);
+})
+
+parser.on('data', function (data) {
+  pdata = JSON.parse(data.toString());
+
+  for (let i = 0; i < maxApplianceCount; i += 1) {
+    appliances[i].status = pdata[i].status;
+  }
+  console.log(appliances);
+  io.emit('appliancedata', appliances);
+});
+
+const enableApplianceMonitoring = () => {
+  port.open();
+}
+
+
+//*********Receiving data from python activity detection
+
+const net = require('net');
+const server = net.createServer();
+
+server.on('connection', function (client) {
+  console.log('Client connected');
+
+  client.on('data', (data) => {
+    //    console.clear()
+    pdata = JSON.parse(data.toString())
+    for (let i = 0; i < maxUserCount; i += 1) {
+      users[i].user = pdata[i].user;
+      users[i].activity = pdata[i].activity;
+    }
+    console.log(users);
+    io.emit('userdata', users);
+  });
+
+  client.on('end', function () {
+    console.log('Client disconnected');
+  })
+
+  client.on('error', (err) => {
+    throw err;
+  });
+
+})
+
+
+const enableUserMonitoring = () => {
+  server.listen(8124, () => { console.log('Server for python bound to 8124'); });
+}
+
+
+//*********Checking abnormal activity and notifications
+
+const request = require('request');
+
+const notificationThreshold = 2;
+const abnormalActivityCheckRate = 2000; //in ms
+
+const sendNotification = message => {
+  console.log(message);
+  request('https://maker.ifttt.com/trigger/fall/with/key/8cD7Gi5e0Xh0Gyql_eOhv?value1=' + message, (error, response, body) => {
+    console.log('error:', error); // Print the error if one occurred
+    console.log('statusCode:', response && response.statusCode); // Print the response status code if a response was received
+    console.log('body:', body); // Print the HTML for the Google homepage.
+  });
+  io.emit('notification', message);
+}
+
+const checkAbnormal = () => {
+ // console.log("Checking")
+  for (let i = 0; i < maxUserCount; i += 1) {
+    if (users[i].user != undefined) {
+
+      if (users[i].activity === 'Fall') {
+        abnormalCount[i].fall += 1;
+        if (abnormalCount[i].fall >= notificationThreshold) {
+          sendNotification('User ' + users[i].user + ' has fallen')
+          abnormalCount[i].fall = 0;
+        }
+      } else {
+        abnormalCount[i].fall = 0;
+      }
+
+      if (appliances[0].status != undefined && appliances[0].status === 'On') {
+        if (users[i].activity === 'Fall') {
+          abnormalCount[i].sittingAndApplianceOn += 1;
+          if (abnormalCount[i].sittingAndApplianceOn >= notificationThreshold) {
+            sendNotification('User ' + users[i].user + ' has fallen and appliance is left unattended')
+            abnormalCount[i].sittingAndApplianceOn = 0;
+          }
+        } else {
+          abnormalCount[i].sittingAndApplianceOn = 0;
+        }
+      }
+    }
+  }
+}
+
+const enableAbnormalActivityMonitoring = () => {
+  setInterval(checkAbnormal, abnormalActivityCheckRate);
+}
+
+
+//*********Enable functions
+
+enableApplianceMonitoring();
+enableUserMonitoring();
+enableAbnormalActivityMonitoring();
+
+//sendNotification("User Vineeth has fallen"); 
